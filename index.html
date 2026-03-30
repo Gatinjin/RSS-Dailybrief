@@ -389,12 +389,12 @@
     { name: "Hacker News", url: "https://hnrss.org/frontpage",              category: "tech"  },
     { name: "The Verge",   url: "https://www.theverge.com/rss/index.xml",   category: "tech"  },
     { name: "Deutsche Welle", url: "https://www.dw.com/de/rss-aktuell/s-10019",       category: "world" },
-    { name: "Wall Street Journal", url: "https://www.wsj.com/news/rss/rss_2_0.xml", category: "world" },
-    { name: "TechCrunch",  url: "https://techcrunch.com/feed/",              category: "tech"  },
-    { name: "Reuters",      url: "https://www.reutersagency.com/feed/?best-topics=technology&post_type=best", category: "tech"  },
+    { name: "Wall Street Journal", url: "https://www.wsj.com/news/rss/rss_2_0.xml", category: "world", direct: true },
+    { name: "TechCrunch",  url: "https://techcrunch.com/feed/",              category: "tech", direct: true  },
+    { name: "Reuters",      url: "https://www.reutersagency.com/feed/?best-topics=technology&post_type=best", category: "world", direct: true  },
     { name: "Al Jazeera",   url: "https://www.aljazeera.com/xml/rss/all.xml", category: "world" },
-    { name: "LRT News",        url: "https://www.lrt.lt/?rss", category: "world" },
-    { name: "The Guardian", url: "https://www.theguardian.com/world/rss", category: "world" },
+    { name: "LRT News",        url: "https://www.lrt.lt/?rss", category: "world", direct: true},
+    { name: "The Guardian", url: "https://www.theguardian.com/world/rss", category: "world", direct: true },
   ];
 
   const MAX_PER_SOURCE = 10;
@@ -438,16 +438,59 @@
   }
 
   // ── 5. FETCH ONE FEED ────────────────────────────────────
+  // Tries three methods in order. Sources marked direct:true skip rss2json
+  // (used for Guardian which returns HTML to rss2json instead of XML).
   async function fetchFeed(source) {
-    const url  = `https://api.rss2json.com/v1/api.json?rss_url=${
-      encodeURIComponent(source.url)}&count=${MAX_PER_SOURCE}`;
-    const res  = await fetch(url);
-    const data = await res.json();
-    return (data.items || []).map(item => ({
-      ...item,
-      source:   source.name,
-      category: source.category,
-    }));
+
+    function parseXML(xml) {
+      try {
+        const doc   = new DOMParser().parseFromString(xml, 'application/xml');
+        const items = Array.from(doc.querySelectorAll('item'));
+        if (!items.length) return null;
+        return items.slice(0, MAX_PER_SOURCE).map(item => {
+          const get = tag => { const el = item.querySelector(tag); return el ? (el.textContent || '').trim() : ''; };
+          return {
+            title:    get('title')   || '(no title)',
+            link:     get('link')    || get('guid') || '#',
+            pubDate:  get('pubDate') || '',
+            source:   source.name,
+            category: source.category,
+          };
+        });
+      } catch (e) { return null; }
+    }
+
+    // Method 1: rss2json — skipped for sources with direct:true
+    if (!source.direct) {
+      try {
+        const u    = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(source.url)}&count=${MAX_PER_SOURCE}`;
+        const res  = await fetch(u);
+        const data = await res.json();
+        if (data.items && data.items.length > 0) {
+          return data.items.map(item => ({ ...item, source: source.name, category: source.category }));
+        }
+      } catch (e) { /* try next */ }
+    }
+
+    // Method 2: allorigins.win raw proxy
+    try {
+      const u      = `https://api.allorigins.win/raw?url=${encodeURIComponent(source.url)}`;
+      const res    = await fetch(u);
+      const xml    = await res.text();
+      const parsed = parseXML(xml);
+      if (parsed && parsed.length) return parsed;
+    } catch (e) { /* try next */ }
+
+    // Method 3: corsproxy.io
+    try {
+      const u      = `https://corsproxy.io/?${encodeURIComponent(source.url)}`;
+      const res    = await fetch(u);
+      const xml    = await res.text();
+      const parsed = parseXML(xml);
+      if (parsed && parsed.length) return parsed;
+    } catch (e) { /* all failed */ }
+
+    return [];
   }
 
   // ── 6. LOAD ALL FEEDS ────────────────────────────────────
